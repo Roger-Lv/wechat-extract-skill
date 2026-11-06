@@ -57,6 +57,10 @@ $SKILL/.venv/bin/python $SKILL/scripts/decrypt_wechat.py <密钥> --tree \
 # 4. 导出 Markdown
 $SKILL/.venv/bin/python $SKILL/scripts/export_markdown.py \
     /tmp/wxout <输出目录> <你自己的wxid>
+
+# 5. 核验归档是不是真的完整（别跳过，理由见下）
+$SKILL/.venv/bin/python $SKILL/scripts/verify_export.py \
+    /tmp/wxout <输出目录> <你自己的wxid>
 ```
 
 账号目录形如：
@@ -71,6 +75,10 @@ $SKILL/.venv/bin/python $SKILL/scripts/export_markdown.py \
 
 - [`chatlog`](https://github.com/sjzar/chatlog) — `chatlog key`（需微信在运行）
 - `PyWxDump` / `wechat-dump-rs` 等
+
+这串 64 位 hex 本身就是 PBKDF2 的**口令**，所以如果你已经拿到它（本机已有的提取结果，或别处保存过），直接喂给 `decrypt_wechat.py` 即可——**不需要 attach 进程，也不需要关 SIP**。实测 macOS + 微信 4.x 可用。
+
+同一条路也有现成封装 [`weflow-cli`](https://www.npmjs.com/package/weflow-cli)：macOS 流程是先 `weflow-cli fav set-key --passphrase <口令>`，再 `weflow-cli init`。注意 `init` 本身只接受 `--path` / `--refresh` / `--test-missing-keys`，**没有 `--passphrase`**。⚠️ 该项目官方标注支持 Windows/Linux、**macOS 未测试**，本仓库也没有实测过它——用前自行验证。
 
 本机 `xwechat_files/all_users/login/<wxid>/key_info.db` 是明文 SQLite，里面存了包装过的密钥（`LoginKeyInfoTable.key_info_data`，180 字节 blob），但还套了一层加密，不能直接读。
 
@@ -98,11 +106,34 @@ CREATE TABLE Msg_<md5>(
 
 联系人昵称在 `contact.db` 的 `contact(username, remark, nick_name, alias)`，优先 `remark`。
 
+## 核验：归档真的完整吗
+
+```bash
+$SKILL/.venv/bin/python $SKILL/scripts/verify_export.py /tmp/wxout <输出目录> <你自己的wxid>
+```
+
+逐会话把源库重新数一遍，与归档里每个 `.md` 头部写的条数对比，对不上的点名，退出码非 0。核验脚本直接 `import export_markdown`，用的是同一套过滤规则，所以两边不会各算各的。
+
+**为什么值得单独跑一步**：这个失败模式是**静默**的。少几条不会报错、不会写日志，产出的 `.md` 结构完好，导出脚本自己打印的合计也只是"它读到的那部分"的合计——没有核验，你分不出一份完整的归档和一份少了 0.007% 的归档。
+
+实测过一次：一轮全量导出里 9 个会话各少 1–30 条（约占总量 0.007%），全程零报错；**重跑同一批会话即恢复**。根因是读到的库快照不含 `-wal` 里尚未 checkpoint 的数据。
+
+对不上时：完全退出微信 → 重跑那几个会话 → 再核验。
+
+它还会报出另外两类容易漏掉的情况：**整个消息表因为没有名字映射被跳过**（会话在 `contact.db`/`session.db` 里找不到），以及**归档里有源库中不存在的文件**（旧归档残留）。
+
+**如果卡在「N 个消息表没有名字映射」上**：那是删掉联系人之后留下的孤儿会话。默认跳过它们，核验就会一直退出 1。给导出和核验都加上 `--include-unmapped`，它们会按表名导出，核验就干净了：
+
+```bash
+$SKILL/.venv/bin/python $SKILL/scripts/export_markdown.py /tmp/wxout <输出目录> <wxid> --include-unmapped
+$SKILL/.venv/bin/python $SKILL/scripts/verify_export.py /tmp/wxout <输出目录> <wxid> --include-unmapped
+```
+
 ## 局限
 
 - **只有本机现存的数据。** 微信 4.0 迁移之前的历史在旧版 3.x 目录里，**用的是另一个密钥**，开不了。
 - **媒体文件（图片/语音/视频）不导出**，只留占位符。媒体是独立的加密 `.dat`，另有解密流程。
-- **WAL 未处理。** 导出前先退出微信，让 SQLite 正常 checkpoint，否则可能丢最近的消息。
+- **WAL 未处理。** 解密读的是主库文件，不含 `-wal` 里尚未 checkpoint 的数据。导出前先退出微信让它正常 checkpoint，否则会**静默**少掉最近的消息。第 5 步的核验能查出是哪些会话少了。
 - 表情、语音等非文本消息只能给类型标签。
 
 ## 排错
@@ -113,6 +144,8 @@ CREATE TABLE Msg_<md5>(
 | HMAC 不匹配 | 密钥不对，或拿的是另一个微信版本的密钥 |
 | 解密"成功"但输出 0 字节 | chatlog 在密钥错时也会留下空文件。用 `decrypt_wechat.py` |
 | `unsupported platform: macos v4` | chatlog 的 CLI 接受 `macos` 但内部工厂只认 `darwin` |
+| 归档比源库少几条，但零报错 | 读到的是不含 `-wal` 的快照。退出微信 → 重跑该会话 → 再核验 |
+| 整个会话没导出，也没有报错 | 它的 `Msg_<md5>` 表在 `contact.db`/`session.db` 里找不到名字映射，被静默跳过。核验脚本会点名；加 `--include-unmapped` 可按表名强行导出 |
 | 容器路径访问极慢/卡住 | macOS TCC。给终端开「完全磁盘访问权限」 |
 
 ## 安全

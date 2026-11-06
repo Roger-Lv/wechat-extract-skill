@@ -103,15 +103,28 @@ def decrypt_file(key, src, dst):
 
 
 def main():
-    if len(sys.argv) < 4:
+    args = sys.argv[1:]
+    if len(args) < 3:
         sys.exit(__doc__)
 
-    key = bytes.fromhex(sys.argv[1])
+    try:
+        key = bytes.fromhex(args[0])
+    except ValueError:
+        sys.exit(f"key must be hex, got {args[0]!r}")
     if len(key) != KEY_SIZE:
         sys.exit(f"key must be {KEY_SIZE} bytes (64 hex chars), got {len(key)}")
 
-    tree = sys.argv[2] == "--tree"
-    src, dst = sys.argv[3], sys.argv[4]
+    # `--tree` takes <src-dir> <dst-dir>; the single-file form takes <src> <dst>.
+    # Both are three arguments after the key, so they are parsed together rather
+    # than by fixed offsets - reading argv[3]/argv[4] unconditionally made the
+    # documented single-file form die with an IndexError.
+    tree = args[1] == "--tree"
+    if tree:
+        if len(args) < 4:
+            sys.exit(__doc__)
+        src, dst = args[2], args[3]
+    else:
+        src, dst = args[1], args[2]
 
     if not tree:
         print(f"{src}: {decrypt_file(key, src, dst)}")

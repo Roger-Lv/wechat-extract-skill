@@ -7,7 +7,7 @@ Handles the quirks of WeChat 4.x storage:
   * group text is stored as "<sender-wxid>:\\n<text>"
   * app messages (type 49) carry an XML payload with title/type/refermsg
 
-Usage: export_markdown.py <decrypted-root> <out-dir> <self-wxid>
+Usage: export_markdown.py <decrypted-root> <out-dir> <self-wxid> [--include-unmapped]
 """
 import hashlib
 import io
@@ -38,6 +38,25 @@ APPMSG_LABEL = {
 }
 
 SENDER_PREFIX = re.compile(r"^([A-Za-z0-9_\-]+):\n")
+
+# Conversations whose Msg_<md5> table matches no username in contact.db /
+# session.db (deleted or otherwise absent contacts). Keyed by their md5 when
+# --include-unmapped is given, so the rows are still exported instead of
+# being dropped without a trace.
+UNMAPPED_PREFIX = "unmapped_"
+
+
+def resolve_talker(table_suffix, by_md5, include_unmapped):
+    talker = by_md5.get(table_suffix)
+    if talker is None and include_unmapped:
+        return UNMAPPED_PREFIX + table_suffix
+    return talker
+
+
+def display_name(talker, display):
+    if talker.startswith(UNMAPPED_PREFIX):
+        return f"未映射会话 {talker[len(UNMAPPED_PREFIX):][:8]}"
+    return display.get(talker, talker)
 
 
 def md5(s):
@@ -204,7 +223,13 @@ def render(ltype, content, known):
 
 
 def main():
-    root, outdir, self_wxid = sys.argv[1], sys.argv[2], sys.argv[3]
+    argv = sys.argv[1:]
+    flags = {a for a in argv if a.startswith("--")}
+    positional = [a for a in argv if not a.startswith("--")]
+    if len(positional) < 3:
+        sys.exit(__doc__)
+    root, outdir, self_wxid = positional[0], positional[1], positional[2]
+    include_unmapped = "--include-unmapped" in flags
     os.makedirs(outdir, exist_ok=True)
 
     by_md5, display, known = build_name_maps(root)
@@ -220,7 +245,7 @@ def main():
             "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'"
         )]
         for table in tables:
-            talker = by_md5.get(table[4:])
+            talker = resolve_talker(table[4:], by_md5, include_unmapped)
             if talker is None:
                 continue
             try:
@@ -251,7 +276,7 @@ def main():
 
     for talker, msgs in sorted(convos.items(), key=lambda kv: -len(kv[1])):
         msgs.sort(key=lambda m: m[0])
-        name = display.get(talker, talker)
+        name = display_name(talker, display)
         safe = "".join(c for c in name if c not in '/\\:*?"<>|').strip() or talker
         path = os.path.join(outdir, f"{safe}__{talker}.md")
 

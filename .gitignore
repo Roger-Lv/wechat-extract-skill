@@ -1,0 +1,15 @@
+# private venv created by scripts/setup.sh
+.venv/
+__pycache__/
+*.pyc
+
+# decrypted databases and exported archives must never be committed
+*.db
+*.db-wal
+*.db-shm
+wxout/
+archive/
+wechat-archive/
+
+# macOS
+.DS_Store
